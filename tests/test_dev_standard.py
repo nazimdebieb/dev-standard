@@ -259,20 +259,21 @@ class WindowsTest(HookCase):
 
     def test_formats_file_with_backslash_payload_path(self) -> None:
         self.repo.write("app/main.py", "x=1\n")
-        marker = self.repo.path.parent / f"ruff-called-{id(self)}"
-        self.addCleanup(marker.unlink, missing_ok=True)
+        marker = Path(self.enterContext(tempfile.TemporaryDirectory())) / "ruff-args"
         bin_dir = self.fake_bin("ruff", f"printf '%s\\n' \"$*\" > \"{marker.as_posix()}\"")
         payload = {"hook_event_name": "PostToolUse", **self.backslash_edit("app/main.py")}
         self.hook("format-file.sh", payload, project_dir=self.repo.path.as_posix(), bin_dir=bin_dir)
-        self.assertIn("format", marker.read_text() if marker.exists() else "ruff was not called")
+        self.assertTrue(marker.exists(), "ruff was not called")
+        self.assertIn("format", marker.read_text())
 
-    @unittest.skipUnless(os.name == "nt", "drive letters exist only on Windows")
+    @unittest.skipUnless(os.name == "nt" and shutil.which("cygpath"), "needs Windows and a bash that ships cygpath")
     def test_matches_other_drive_spellings(self) -> None:
         native = str(self.repo.path)
-        msys_root = "/" + native[0].lower() + native[2:].replace("\\", "/")
+        # /c/x on Git Bash and MSYS2, /cygdrive/c/x on Cygwin.
+        unix_root = subprocess.run(["cygpath", "-u", native], check=True, capture_output=True, text=True).stdout.strip()
         payload = self.edit("app/main.py")
         payload["tool_input"]["file_path"] = native[0].lower() + payload["tool_input"]["file_path"][1:]
-        result = self.hook("require-spec.sh", payload, project_dir=msys_root)
+        result = self.hook("require-spec.sh", payload, project_dir=unix_root)
         self.assertEqual(result.returncode, 2, result.stderr)
 
 

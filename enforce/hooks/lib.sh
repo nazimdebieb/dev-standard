@@ -7,7 +7,8 @@
 set -euo pipefail
 
 # ds_norm_path <path>: one spelling per path. On Windows, Claude Code sends C:\x\y while
-# bash may say /c/x/y, so both become C:/x/y through cygpath (Git Bash, MSYS2, Cygwin).
+# bash may say /c/x/y (Git Bash, MSYS2) or /cygdrive/c/x/y (Cygwin), so cygpath turns
+# them all into C:/x/y.
 # Elsewhere only backslashes change, which no Linux or macOS payload path contains.
 ds_norm_path() {
   local path=${1//\\//}
