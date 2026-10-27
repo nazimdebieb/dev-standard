@@ -30,6 +30,12 @@ wording or tooling without changing what a rule requires.
 
 - Brainstorm board: all stages showed at once when opened from disk, and direction options
   rendered as uppercase labels.
+- Hooks on Windows: jq for Windows prints CRLF, so every value read from the payload or
+  `.dev-standard.json` kept a trailing `\r`, and Claude Code sends `C:\x\y` file paths
+  that never matched the project root. `require-spec.sh`, `require-brainstorm.sh` and
+  `guard-approvals.sh` let every edit through, and `format-file.sh` never ran. The hooks
+  now strip `\r` from jq output and normalize paths with `cygpath` when it exists.
+- Tests call `bash` and Python explicitly, so they also run on Windows.
 
 ### Planned
 

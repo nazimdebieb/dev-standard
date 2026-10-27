@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 HOOKS = ROOT / "enforce" / "hooks"
 CLI = ROOT / "cli" / "dev-standard"
+# Call bash and Python explicitly: Windows can't run a script from its shebang line.
+BASH = shutil.which("bash") or "bash"
 
 MANIFEST = {
     "version": "0.1.0",
@@ -67,9 +71,13 @@ class HookCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.repo.close()
 
-    def hook(self, name: str, payload: dict) -> subprocess.CompletedProcess[str]:
-        env = {**os.environ, "CLAUDE_PROJECT_DIR": str(self.repo.path)}
-        return subprocess.run([str(HOOKS / name)], input=json.dumps(payload), capture_output=True, text=True, env=env)
+    def hook(self, name: str, payload: dict, project_dir: str | None = None,
+             bin_dir: str | None = None) -> subprocess.CompletedProcess[str]:
+        env = {**os.environ, "CLAUDE_PROJECT_DIR": project_dir or str(self.repo.path)}
+        if bin_dir:
+            env["PATH"] = bin_dir + os.pathsep + env["PATH"]
+        return subprocess.run([BASH, (HOOKS / name).as_posix()], input=json.dumps(payload),
+                              capture_output=True, text=True, env=env)
 
     def edit(self, rel: str, **tool_input: str) -> dict:
         return {"hook_event_name": "PreToolUse", "tool_input": {"file_path": str(self.repo.path / rel), **tool_input}}
@@ -205,6 +213,69 @@ class DefinitionOfDoneTest(HookCase):
         self.assertEqual(self.run_stop().returncode, 0)
 
 
+class WindowsTest(HookCase):
+    """jq for Windows prints CRLF, and Claude Code on Windows sends C:\\x\\y payload paths."""
+
+    def fake_bin(self, name: str, body: str) -> str:
+        bin_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        script = bin_dir / name
+        script.write_text(f"#!/usr/bin/env bash\n{body}\n", newline="\n")
+        script.chmod(0o755)
+        return str(bin_dir)
+
+    def crlf_jq(self) -> str:
+        real_jq = Path(shutil.which("jq") or "jq").as_posix()
+        return self.fake_bin("jq", f"set -o pipefail\n\"{real_jq}\" \"$@\" | awk '{{ sub(/\\r$/, \"\"); printf \"%s\\r\\n\", $0 }}'")
+
+    def backslash_edit(self, rel: str, **tool_input: str) -> dict:
+        payload = self.edit(rel, **tool_input)
+        payload["tool_input"]["file_path"] = payload["tool_input"]["file_path"].replace("/", "\\")
+        return payload
+
+    def test_blocks_source_edit_when_jq_prints_crlf(self) -> None:
+        result = self.hook("require-spec.sh", self.edit("app/main.py"), bin_dir=self.crlf_jq())
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("SDD-001", result.stderr)
+
+    def test_reads_enforcement_level_when_jq_prints_crlf(self) -> None:
+        self.repo.manifest(enforcement={"default": "block", "groups": {"SDD": "warn"}})
+        result = self.hook("require-spec.sh", self.edit("app/main.py"), bin_dir=self.crlf_jq())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SDD-001", json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"])
+
+    def test_runs_fast_check_when_jq_prints_crlf(self) -> None:
+        self.repo.manifest(checks={"fast": "true"})
+        payload = {"hook_event_name": "Stop", "session_id": f"t-{id(self)}"}
+        self.assertEqual(self.hook("definition-of-done.sh", payload, bin_dir=self.crlf_jq()).returncode, 0)
+
+    def test_blocks_source_edit_with_backslash_payload_path(self) -> None:
+        result = self.hook("require-spec.sh", self.backslash_edit("app/main.py"), project_dir=self.repo.path.as_posix())
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("SDD-001", result.stderr)
+
+    def test_guards_approval_with_backslash_payload_path(self) -> None:
+        payload = self.backslash_edit("specs/013-faster-restock/spec.md", new_string="**Status**: Approved")
+        self.assertEqual(self.hook("guard-approvals.sh", payload, project_dir=self.repo.path.as_posix()).returncode, 2)
+
+    def test_formats_file_with_backslash_payload_path(self) -> None:
+        self.repo.write("app/main.py", "x=1\n")
+        marker = self.repo.path.parent / f"ruff-called-{id(self)}"
+        self.addCleanup(marker.unlink, missing_ok=True)
+        bin_dir = self.fake_bin("ruff", f"printf '%s\\n' \"$*\" > \"{marker.as_posix()}\"")
+        payload = {"hook_event_name": "PostToolUse", **self.backslash_edit("app/main.py")}
+        self.hook("format-file.sh", payload, project_dir=self.repo.path.as_posix(), bin_dir=bin_dir)
+        self.assertIn("format", marker.read_text() if marker.exists() else "ruff was not called")
+
+    @unittest.skipUnless(os.name == "nt", "drive letters exist only on Windows")
+    def test_matches_other_drive_spellings(self) -> None:
+        native = str(self.repo.path)
+        msys_root = "/" + native[0].lower() + native[2:].replace("\\", "/")
+        payload = self.edit("app/main.py")
+        payload["tool_input"]["file_path"] = native[0].lower() + payload["tool_input"]["file_path"][1:]
+        result = self.hook("require-spec.sh", payload, project_dir=msys_root)
+        self.assertEqual(result.returncode, 2, result.stderr)
+
+
 class CliCase(unittest.TestCase):
     def setUp(self) -> None:
         self.repo = GitRepo()
@@ -217,7 +288,7 @@ class CliCase(unittest.TestCase):
     def cli(self, *args: str, env: dict | None = None) -> subprocess.CompletedProcess[str]:
         full_env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_ACTIONS", "GITHUB_HEAD_REF", "PR_TITLE", "PR_BODY")}
         full_env.update(env or {})
-        return subprocess.run([str(CLI), "check", *args, "--root", str(self.repo.path)],
+        return subprocess.run([sys.executable, str(CLI), "check", *args, "--root", str(self.repo.path)],
                               capture_output=True, text=True, env=full_env)
 
 

@@ -15,7 +15,7 @@ num=${BASH_REMATCH[1]}
 in_source=false
 while IFS= read -r dir; do
   if [[ -n "$dir" && "$rel" == "$dir"* ]]; then in_source=true; fi
-done < <(jq -r '(.paths.source // ["src/", "app/"])[]' "$DS_MANIFEST" 2>/dev/null || printf 'src/\napp/\n')
+done < <(ds_jq -r '(.paths.source // ["src/", "app/"])[]' "$DS_MANIFEST" 2>/dev/null || printf 'src/\napp/\n')
 $in_source || exit 0
 if ds_waived SDD-001 "$rel"; then exit 0; fi
 

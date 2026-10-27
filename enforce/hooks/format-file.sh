@@ -5,7 +5,7 @@ source "$(dirname "$0")/lib.sh"
 ds_need_jq
 ds_read_input
 
-file=$(ds_field '.tool_input.file_path')
+file=$(ds_file_path)
 [[ -n "$file" && -f "$file" && "$file" == "$DS_ROOT"/* ]] || exit 0
 
 first_tool() {
